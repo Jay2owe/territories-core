@@ -96,13 +96,19 @@ path — geometry, not a user interface.
 
 ## Licence
 
-BSD-3-Clause.
+BSD-3-Clause — see `LICENSE`. Attribution and third-party notices are in
+`NOTICE`.
 
-JTS is dual-licensed **EPL 2.0 / EDL 1.0**. EDL 1.0 is BSD-3 in substance, so
-a BSD-3 consumer takes JTS under EDL and ships under BSD-3 with the JTS notice
-retained (`04 - Object Territories` carries it at
-`src/main/resources/META-INF/licenses/JTS-LICENSE.txt`; every consumer should
-do the same). Nothing here links GPL.
+JTS supplies the 2D path: exact Voronoi tessellation, Delaunay adjacency and
+polygon overlay. It is dual-licensed **EPL 2.0 / EDL 1.0**. EDL 1.0 is BSD-3
+in substance, so a BSD-3 consumer takes JTS under EDL and ships under BSD-3
+with the JTS notice retained. Nothing here links GPL.
+
+This module carries that notice itself, at
+`src/main/resources/META-INF/licenses/JTS-LICENSE.txt`, so it travels with any
+jar that bundles or shades the module — a consumer inherits it rather than
+having to remember it. `04 - Object Territories` carries the same file at the
+same path.
 
 ## Ship gate
 

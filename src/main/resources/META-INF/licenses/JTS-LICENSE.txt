@@ -1,0 +1,10 @@
+JTS Topology Suite is distributed under the Eclipse Public License 2.0
+and the Eclipse Distribution License 1.0.
+
+Project: https://github.com/locationtech/jts
+Licences:
+https://www.eclipse.org/legal/epl-2.0/
+https://www.eclipse.org/org/documents/edl-v10.php
+
+The complete upstream licence texts are retained in JTS source distributions.
+
