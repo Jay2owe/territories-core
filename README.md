@@ -1,5 +1,7 @@
 # territories-core
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21933304.svg)](https://doi.org/10.5281/zenodo.21933304)
+
 The Object Territories engine, as an embeddable module.
 
 **Status (2026-08-11): built, adopted and shipping inside the plugin.**
@@ -93,6 +95,12 @@ the 1–5 input images it came from.
 Must run headless. Throws `IllegalArgumentException`; the plugin presents.
 `java.awt.geom` is used inside `RegionFactory` only to read an ImageJ ROI's
 path — geometry, not a user interface.
+
+## Citation
+
+> Malcolm, J. (2026). *territories-core: Embeddable spatial territory and
+> density engine* (Version 0.1.0) [Computer software]. Zenodo.
+> https://doi.org/10.5281/zenodo.21933305
 
 ## Licence
 
