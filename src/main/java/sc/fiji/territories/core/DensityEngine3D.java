@@ -50,20 +50,9 @@ public final class DensityEngine3D {
                         region.getPixelHeight(),
                         region.getPixelDepth());
         float[][] pixels = initialiseVolume(region);
-        ArrayList<Kernel> kernels = new ArrayList<Kernel>(objects.size());
-        for (SpatialObject3D object : objects) {
-            Kernel kernel = kernel(
-                    object,
-                    region,
-                    components,
-                    bandwidth,
-                    weighting,
-                    boundaryMode);
-            if (kernel != null) kernels.add(kernel);
-        }
-        for (Kernel kernel : kernels) {
-            accumulate(kernel, pixels, region, components, bandwidth);
-        }
+        List<Kernel> kernels = kernels(
+                objects, region, components, bandwidth, weighting, boundaryMode);
+        accumulate(kernels, pixels, region, components, bandwidth);
 
         ImagePlus image = image(pixels, region, typeName);
         return new DensityResult3D(
@@ -105,6 +94,40 @@ public final class DensityEngine3D {
         return result;
     }
 
+    /**
+     * Kernels in object order, their support sums computed in parallel. The
+     * first failure in object order is thrown, exactly as the serial loop
+     * would.
+     */
+    private static List<Kernel> kernels(
+            List<SpatialObject3D> objects,
+            RegionMask3D region,
+            int[] components,
+            double bandwidth,
+            DensityWeighting weighting,
+            DensityBoundaryMode boundaryMode) {
+        int count = objects.size();
+        Kernel[] computed = new Kernel[count];
+        RuntimeException[] failures = new RuntimeException[count];
+        Parallel.forRange(0, count, (from, to) -> {
+            for (int i = from; i < to; i++) {
+                try {
+                    computed[i] = kernel(
+                            objects.get(i), region, components, bandwidth,
+                            weighting, boundaryMode);
+                } catch (RuntimeException failure) {
+                    failures[i] = failure;
+                }
+            }
+        });
+        ArrayList<Kernel> kernels = new ArrayList<Kernel>(count);
+        for (int i = 0; i < count; i++) {
+            if (failures[i] != null) throw failures[i];
+            if (computed[i] != null) kernels.add(computed[i]);
+        }
+        return kernels;
+    }
+
     private static Kernel kernel(
             SpatialObject3D object,
             RegionMask3D region,
@@ -144,27 +167,60 @@ public final class DensityEngine3D {
                         + region.getPixelHeight() + " x " + region.getPixelDepth() + ")");
     }
 
+    /**
+     * Adds every kernel to the volume. The volume is split into bands of
+     * whole image rows (row {@code z * height + y}); workers own disjoint
+     * bands and visit the kernels in list order, so each voxel receives
+     * exactly the serial sequence of float additions.
+     */
+    private static void accumulate(
+            List<Kernel> kernels,
+            float[][] pixels,
+            RegionMask3D region,
+            int[] components,
+            double bandwidth) {
+        int height = region.getHeight();
+        Parallel.forRange(0, region.getDepth() * height, (fromRow, toRow) -> {
+            int firstZ = fromRow / height;
+            int lastZ = (toRow - 1) / height;
+            for (Kernel kernel : kernels) {
+                int fromZ = Math.max(kernel.bounds.minimumZ, firstZ);
+                int toZ = Math.min(kernel.bounds.maximumZ, lastZ);
+                for (int z = fromZ; z <= toZ; z++) {
+                    int bandFromY = z == firstZ ? fromRow - z * height : 0;
+                    int bandToY = z == lastZ ? toRow - 1 - z * height : height - 1;
+                    accumulate(
+                            kernel, pixels, region, components, bandwidth, z,
+                            Math.max(kernel.bounds.minimumY, bandFromY),
+                            Math.min(kernel.bounds.maximumY, bandToY));
+                }
+            }
+        });
+    }
+
+    /** One z-slice of one kernel, rows {@code minimumY..maximumY}. */
     private static void accumulate(
             Kernel kernel,
             float[][] pixels,
             RegionMask3D region,
             int[] components,
-            double bandwidth) {
+            double bandwidth,
+            int z,
+            int minimumY,
+            int maximumY) {
         double inverseTwoBandwidthSquared = 1.0 / (2.0 * bandwidth * bandwidth);
         SpatialObject3D object = kernel.object;
-        for (int z = kernel.bounds.minimumZ; z <= kernel.bounds.maximumZ; z++) {
-            double dz = (z + 0.5) * region.getPixelDepth() - object.getCentroidZ();
-            for (int y = kernel.bounds.minimumY; y <= kernel.bounds.maximumY; y++) {
-                double dy = (y + 0.5) * region.getPixelHeight() - object.getCentroidY();
-                for (int x = kernel.bounds.minimumX; x <= kernel.bounds.maximumX; x++) {
-                    int index = (z * region.getHeight() + y) * region.getWidth() + x;
-                    if (components[index] != kernel.component) continue;
-                    double dx = (x + 0.5) * region.getPixelWidth() - object.getCentroidX();
-                    double gaussian = Math.exp(
-                            -(dx * dx + dy * dy + dz * dz) * inverseTwoBandwidthSquared);
-                    pixels[z][y * region.getWidth() + x] +=
-                            (float) (gaussian * kernel.scale);
-                }
+        double dz = (z + 0.5) * region.getPixelDepth() - object.getCentroidZ();
+        for (int y = minimumY; y <= maximumY; y++) {
+            double dy = (y + 0.5) * region.getPixelHeight() - object.getCentroidY();
+            for (int x = kernel.bounds.minimumX; x <= kernel.bounds.maximumX; x++) {
+                int index = (z * region.getHeight() + y) * region.getWidth() + x;
+                if (components[index] != kernel.component) continue;
+                double dx = (x + 0.5) * region.getPixelWidth() - object.getCentroidX();
+                double gaussian = Math.exp(
+                        -(dx * dx + dy * dy + dz * dz) * inverseTwoBandwidthSquared);
+                pixels[z][y * region.getWidth() + x] +=
+                        (float) (gaussian * kernel.scale);
             }
         }
     }
@@ -194,34 +250,42 @@ public final class DensityEngine3D {
         return result;
     }
 
+    /** Leave-one-out density at each object, computed in parallel, returned in object order. */
     private static Map<Integer, Double> localDensity(
             List<SpatialObject3D> objects,
             List<Kernel> kernels,
             RegionMask3D region,
             int[] components,
             double bandwidth) {
-        LinkedHashMap<Integer, Double> result = new LinkedHashMap<Integer, Double>();
         double inverseTwoBandwidthSquared = 1.0 / (2.0 * bandwidth * bandwidth);
         double radius = RADIUS_IN_SIGMAS * bandwidth;
-        for (SpatialObject3D selected : objects) {
-            double density = 0.0;
-            int selectedComponent = componentAtObject(selected, region, components);
-            for (Kernel kernel : kernels) {
-                if (kernel.object.getIndex() == selected.getIndex()) continue;
-                if (kernel.component != selectedComponent) continue;
-                double dx = selected.getCentroidX() - kernel.object.getCentroidX();
-                double dy = selected.getCentroidY() - kernel.object.getCentroidY();
-                double dz = selected.getCentroidZ() - kernel.object.getCentroidZ();
-                if (Math.abs(dx) > radius
-                        || Math.abs(dy) > radius
-                        || Math.abs(dz) > radius) {
-                    continue;
+        double[] densities = new double[objects.size()];
+        Parallel.forRange(0, objects.size(), (from, to) -> {
+            for (int i = from; i < to; i++) {
+                SpatialObject3D selected = objects.get(i);
+                double density = 0.0;
+                int selectedComponent = componentAtObject(selected, region, components);
+                for (Kernel kernel : kernels) {
+                    if (kernel.object.getIndex() == selected.getIndex()) continue;
+                    if (kernel.component != selectedComponent) continue;
+                    double dx = selected.getCentroidX() - kernel.object.getCentroidX();
+                    double dy = selected.getCentroidY() - kernel.object.getCentroidY();
+                    double dz = selected.getCentroidZ() - kernel.object.getCentroidZ();
+                    if (Math.abs(dx) > radius
+                            || Math.abs(dy) > radius
+                            || Math.abs(dz) > radius) {
+                        continue;
+                    }
+                    density += Math.exp(
+                            -(dx * dx + dy * dy + dz * dz) * inverseTwoBandwidthSquared)
+                            * kernel.scale;
                 }
-                density += Math.exp(
-                        -(dx * dx + dy * dy + dz * dz) * inverseTwoBandwidthSquared)
-                        * kernel.scale;
+                densities[i] = density;
             }
-            result.put(selected.getIndex(), density);
+        });
+        LinkedHashMap<Integer, Double> result = new LinkedHashMap<Integer, Double>();
+        for (int i = 0; i < objects.size(); i++) {
+            result.put(objects.get(i).getIndex(), densities[i]);
         }
         return result;
     }

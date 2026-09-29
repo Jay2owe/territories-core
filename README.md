@@ -4,9 +4,10 @@
 
 The Object Territories engine, as an embeddable module.
 
-**Status (2026-08-11): built, adopted and shipping inside the plugin.**
-52 tests green here; Object Territories runs on it, its own copy of the engine
-deleted, 37 tests green and **1,221 golden cases unmoved, bit-for-bit.**
+**Status (2026-09-29): 0.2.0, shipping inside Object Territories 0.3.0.**
+63 tests green here. Density maps and 3D territory assignment now run in
+parallel with outputs bit-identical to 0.1.0; the plugin's 1,221 golden cases
+are unmoved, bit-for-bit.
 
 **Pattern:** `../PLUGIN_CORE_PATTERN.md`
 **Depends on:** `net.imagej:ij` (provided) and `org.locationtech.jts:jts-core`
@@ -28,7 +29,7 @@ deleted, 37 tests green and **1,221 golden cases unmoved, bit-for-bit.**
 Build and test:
 
 ```
-mvn -o test        # 52 tests
+mvn -o test        # 63 tests
 mvn -o install     # needed before Object Territories can build
 ```
 
@@ -45,7 +46,7 @@ object in" without the user installing Object Territories.
 <dependency>
   <groupId>io.github.jay2owe</groupId>
   <artifactId>territories-core</artifactId>
-  <version>0.1.0</version>
+  <version>0.2.0</version>
 </dependency>
 ```
 
@@ -95,6 +96,22 @@ the 1–5 input images it came from.
 Must run headless. Throws `IllegalArgumentException`; the plugin presents.
 `java.awt.geom` is used inside `RegionFactory` only to read an ImageJ ROI's
 path — geometry, not a user interface.
+
+## Parallel execution
+
+Since 0.2.0 the density engines (`DensityEngine`, `DensityEngine3D`) and 3D
+territory assignment (`TerritoryEngine3D`) spread their work across threads,
+as `InteractionEngine` already did for permutations. Outputs are
+bit-identical to the serial code at every thread count: each pixel or voxel
+is written by one thread only, and it receives its kernel contributions in
+the original object order, so every float addition happens in the same
+sequence. `DensityParallelDeterminismTest` and
+`TerritoryEngine3DParallelTest` check this bit for bit.
+
+One rule sets the thread count for the whole module: the
+`territories.parallelism` system property when it is positive, otherwise the
+available processors capped at 8. `-Dterritories.parallelism=1` runs every
+engine serially on the calling thread.
 
 ## Citation
 

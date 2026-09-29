@@ -77,24 +77,13 @@ public final class DensityEngine {
             if (raster.componentByPixel[i] < 0) pixels[i] = Float.NaN;
         }
 
-        ArrayList<Kernel> kernels = new ArrayList<Kernel>(objects.size());
-        for (SpatialObject2D object : objects) {
-            Kernel kernel = kernel(
-                    object, raster, width, height, pixelWidth, pixelHeight,
-                    bandwidth, weighting, boundaryMode);
-            if (kernel != null) kernels.add(kernel);
-        }
-        for (Kernel kernel : kernels) {
-            accumulate(
-                    kernel,
-                    pixels,
-                    raster.componentByPixel,
-                    width,
-                    height,
-                    pixelWidth,
-                    pixelHeight,
-                    bandwidth);
-        }
+        int[] componentOf = new int[objects.size()];
+        List<Kernel> kernels = kernels(
+                objects, componentOf, raster, width, height, pixelWidth, pixelHeight,
+                bandwidth, weighting, boundaryMode);
+        accumulate(
+                kernels, pixels, raster.componentByPixel, width, height,
+                pixelWidth, pixelHeight, bandwidth);
 
         FloatProcessor processor = new FloatProcessor(width, height, pixels);
         String title = safe(typeName) + "_" + safe(region.getName()) + "_Density";
@@ -106,7 +95,7 @@ public final class DensityEngine {
                 spatialUnit == null || spatialUnit.trim().isEmpty() ? "um" : spatialUnit);
 
         Map<Integer, Double> localDensity = localDensity(
-                objects, kernels, raster, bandwidth);
+                objects, componentOf, kernels, bandwidth);
         return new DensityResult(
                 region.getName(), typeName, weighting, boundaryMode,
                 bandwidth, image, localDensity);
@@ -152,24 +141,78 @@ public final class DensityEngine {
             int maximumY = Math.min(
                     height - 1,
                     (int) Math.ceil(geometry.getEnvelopeInternal().getMaxY() / pixelHeight));
-            for (int y = minimumY; y <= maximumY; y++) {
-                double physicalY = (y + 0.5) * pixelHeight;
-                for (int x = minimumX; x <= maximumX; x++) {
-                    int index = y * width + x;
-                    if (componentByPixel[index] >= 0) continue;
-                    double physicalX = (x + 0.5) * pixelWidth;
-                    if (preparedGeometry.covers(GEOMETRY_FACTORY.createPoint(
-                            new Coordinate(physicalX, physicalY)))) {
-                        componentByPixel[index] = component;
+            final int currentComponent = component;
+            // Rows are independent. Each chunk prepares its own copy of the
+            // geometry, so no lazily built JTS index is shared between threads.
+            Parallel.forRange(minimumY, maximumY + 1, (fromY, toY) -> {
+                PreparedGeometry rows = PreparedGeometryFactory.prepare(geometry);
+                for (int y = fromY; y < toY; y++) {
+                    double physicalY = (y + 0.5) * pixelHeight;
+                    for (int x = minimumX; x <= maximumX; x++) {
+                        int index = y * width + x;
+                        if (componentByPixel[index] >= 0) continue;
+                        double physicalX = (x + 0.5) * pixelWidth;
+                        if (rows.covers(GEOMETRY_FACTORY.createPoint(
+                                new Coordinate(physicalX, physicalY)))) {
+                            componentByPixel[index] = currentComponent;
+                        }
                     }
                 }
-            }
+            });
         }
         return new RasterDomain(componentByPixel, prepared);
     }
 
+    /**
+     * Kernels in object order. Region components are located serially (the
+     * prepared JTS geometries are shared); kernel support sums run in
+     * parallel. The first failure in object order is thrown, exactly as the
+     * serial loop would.
+     */
+    private static List<Kernel> kernels(
+            List<SpatialObject2D> objects,
+            int[] componentOf,
+            RasterDomain raster,
+            int width,
+            int height,
+            double pixelWidth,
+            double pixelHeight,
+            double bandwidth,
+            DensityWeighting weighting,
+            DensityBoundaryMode boundaryMode) {
+        int count = objects.size();
+        Kernel[] computed = new Kernel[count];
+        RuntimeException[] failures = new RuntimeException[count];
+        for (int i = 0; i < count; i++) {
+            try {
+                componentOf[i] = componentAtObject(objects.get(i), raster);
+            } catch (RuntimeException failure) {
+                failures[i] = failure;
+            }
+        }
+        Parallel.forRange(0, count, (from, to) -> {
+            for (int i = from; i < to; i++) {
+                if (failures[i] != null) continue;
+                try {
+                    computed[i] = kernel(
+                            objects.get(i), componentOf[i], raster, width, height,
+                            pixelWidth, pixelHeight, bandwidth, weighting, boundaryMode);
+                } catch (RuntimeException failure) {
+                    failures[i] = failure;
+                }
+            }
+        });
+        ArrayList<Kernel> kernels = new ArrayList<Kernel>(count);
+        for (int i = 0; i < count; i++) {
+            if (failures[i] != null) throw failures[i];
+            if (computed[i] != null) kernels.add(computed[i]);
+        }
+        return kernels;
+    }
+
     private static Kernel kernel(
             SpatialObject2D object,
+            int component,
             RasterDomain raster,
             int width,
             int height,
@@ -179,7 +222,6 @@ public final class DensityEngine {
             DensityWeighting weighting,
             DensityBoundaryMode boundaryMode) {
         Bounds bounds = bounds(object, width, height, pixelWidth, pixelHeight, bandwidth);
-        int component = componentAtObject(object, raster);
         double weight = weighting == DensityWeighting.OBJECT_COUNT ? 1.0 : object.getArea();
         double supported = gaussianSum(
                 object,
@@ -214,8 +256,13 @@ public final class DensityEngine {
                         + "resolution (pixel size " + pixelWidth + " x " + pixelHeight + ")");
     }
 
+    /**
+     * Adds every kernel to the map. Workers own disjoint row bands and visit
+     * the kernels in list order, so each pixel receives exactly the serial
+     * sequence of float additions.
+     */
     private static void accumulate(
-            Kernel kernel,
+            List<Kernel> kernels,
             float[] pixels,
             int[] components,
             int width,
@@ -223,9 +270,30 @@ public final class DensityEngine {
             double pixelWidth,
             double pixelHeight,
             double bandwidth) {
+        Parallel.forRange(0, height, (fromY, toY) -> {
+            for (Kernel kernel : kernels) {
+                accumulate(
+                        kernel, pixels, components, width,
+                        pixelWidth, pixelHeight, bandwidth,
+                        Math.max(kernel.bounds.minimumY, fromY),
+                        Math.min(kernel.bounds.maximumY, toY - 1));
+            }
+        });
+    }
+
+    private static void accumulate(
+            Kernel kernel,
+            float[] pixels,
+            int[] components,
+            int width,
+            double pixelWidth,
+            double pixelHeight,
+            double bandwidth,
+            int minimumY,
+            int maximumY) {
         double inverseTwoBandwidthSquared = 1.0 / (2.0 * bandwidth * bandwidth);
         SpatialObject2D object = kernel.object;
-        for (int y = kernel.bounds.minimumY; y <= kernel.bounds.maximumY; y++) {
+        for (int y = minimumY; y <= maximumY; y++) {
             double dy = (y + 0.5) * pixelHeight - object.getCentroidY();
             for (int x = kernel.bounds.minimumX; x <= kernel.bounds.maximumX; x++) {
                 int index = y * width + x;
@@ -259,27 +327,35 @@ public final class DensityEngine {
         return result;
     }
 
+    /** Leave-one-out density at each object, computed in parallel, returned in object order. */
     private static Map<Integer, Double> localDensity(
             List<SpatialObject2D> objects,
+            int[] componentOf,
             List<Kernel> kernels,
-            RasterDomain raster,
             double bandwidth) {
-        LinkedHashMap<Integer, Double> result = new LinkedHashMap<Integer, Double>();
         double inverseTwoBandwidthSquared = 1.0 / (2.0 * bandwidth * bandwidth);
         double radius = KERNEL_RADIUS_IN_SIGMAS * bandwidth;
-        for (SpatialObject2D selected : objects) {
-            double density = 0.0;
-            int selectedComponent = componentAtObject(selected, raster);
-            for (Kernel kernel : kernels) {
-                if (kernel.object.getIndex() == selected.getIndex()) continue;
-                if (kernel.component != selectedComponent) continue;
-                double dx = selected.getCentroidX() - kernel.object.getCentroidX();
-                double dy = selected.getCentroidY() - kernel.object.getCentroidY();
-                if (Math.abs(dx) > radius || Math.abs(dy) > radius) continue;
-                density += Math.exp(-(dx * dx + dy * dy) * inverseTwoBandwidthSquared)
-                        * kernel.scale;
+        double[] densities = new double[objects.size()];
+        Parallel.forRange(0, objects.size(), (from, to) -> {
+            for (int i = from; i < to; i++) {
+                SpatialObject2D selected = objects.get(i);
+                double density = 0.0;
+                int selectedComponent = componentOf[i];
+                for (Kernel kernel : kernels) {
+                    if (kernel.object.getIndex() == selected.getIndex()) continue;
+                    if (kernel.component != selectedComponent) continue;
+                    double dx = selected.getCentroidX() - kernel.object.getCentroidX();
+                    double dy = selected.getCentroidY() - kernel.object.getCentroidY();
+                    if (Math.abs(dx) > radius || Math.abs(dy) > radius) continue;
+                    density += Math.exp(-(dx * dx + dy * dy) * inverseTwoBandwidthSquared)
+                            * kernel.scale;
+                }
+                densities[i] = density;
             }
-            result.put(selected.getIndex(), density);
+        });
+        LinkedHashMap<Integer, Double> result = new LinkedHashMap<Integer, Double>();
+        for (int i = 0; i < objects.size(); i++) {
+            result.put(objects.get(i).getIndex(), densities[i]);
         }
         return result;
     }

@@ -139,7 +139,7 @@ public final class InteractionEngine {
             int permutations,
             long seed) {
         final int[][][] result = new int[permutations][typeCount][typeCount];
-        int workers = workerCount(permutations);
+        int workers = Parallel.workers(permutations);
         int[] shuffled = observedTypes.clone();
         Random random = new Random(seed);
         if (workers == 1) {
@@ -178,14 +178,6 @@ public final class InteractionEngine {
         } finally {
             stop(executor);
         }
-    }
-
-    private static int workerCount(int tasks) {
-        if (tasks < 2) return 1;
-        int configured = Integer.getInteger("territories.parallelism", 0).intValue();
-        int available = Runtime.getRuntime().availableProcessors();
-        int desired = configured > 0 ? configured : Math.min(available, 8);
-        return Math.max(1, Math.min(tasks, desired));
     }
 
     private static IndexedCount take(CompletionService<IndexedCount> completion) {

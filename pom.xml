@@ -6,23 +6,22 @@
 	<modelVersion>4.0.0</modelVersion>
 
 	<!--
-	  pom-scijava 31.1.0, not the 43.0.0 the other cores use, deliberately.
-	  This module's only consumer today is Object Territories, which is on
-	  31.1.0, and the extraction is gated on bit-identical output. Resolving a
-	  different net.imagej:ij build here than the plugin resolves would put a
-	  second ImageJ on the test classpath and make that gate meaningless.
-	  Raise this only together with the plugin. See DECISIONS.md § 2.
+	  pom-scijava 43.0.0, the same parent as Object Territories 0.3.0. Keep
+	  the two equal: resolving a different net.imagej:ij build here than the
+	  plugin resolves would put a second ImageJ on the test classpath and make
+	  the plugin's bit-identical golden gate meaningless. Raise this only
+	  together with the plugin.
 	-->
 	<parent>
 		<groupId>org.scijava</groupId>
 		<artifactId>pom-scijava</artifactId>
-		<version>31.1.0</version>
+		<version>43.0.0</version>
 		<relativePath/>
 	</parent>
 
 	<groupId>io.github.jay2owe</groupId>
 	<artifactId>territories-core</artifactId>
-	<version>0.1.0</version>
+	<version>0.2.0</version>
 
 	<name>territories-core</name>
 	<description>Bounded Voronoi territory, neighbourhood-interaction and kernel-density engine, as an embeddable module. Never shipped as a jar.</description>

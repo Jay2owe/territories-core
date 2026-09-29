@@ -4,12 +4,17 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 
-/** Balanced 3D k-d tree for repeated calibrated nearest-centroid queries. */
+/**
+ * Balanced 3D k-d tree for repeated calibrated nearest-centroid queries.
+ *
+ * <p>The tree is immutable. {@link #nearest} keeps its search state in this
+ * instance and is for one thread; concurrent callers each take their own
+ * {@link #query()}.
+ */
 final class NearestCentroid3D {
 
     private final Node root;
-    private SpatialObject3D bestObject;
-    private double bestSquaredDistance;
+    private final Query shared;
 
     NearestCentroid3D(List<SpatialObject3D> objects) {
         if (objects == null || objects.isEmpty()) {
@@ -17,36 +22,56 @@ final class NearestCentroid3D {
         }
         SpatialObject3D[] values = objects.toArray(new SpatialObject3D[0]);
         this.root = build(values, 0, values.length, 0);
+        this.shared = new Query();
     }
 
+    /** Nearest centroid, lowest global index on ties. Not thread-safe; see {@link #query()}. */
     SpatialObject3D nearest(double x, double y, double z) {
-        bestObject = null;
-        bestSquaredDistance = Double.POSITIVE_INFINITY;
-        search(root, x, y, z);
-        return bestObject;
+        return shared.nearest(x, y, z);
     }
 
-    private void search(Node node, double x, double y, double z) {
-        if (node == null) return;
-        double dx = x - node.object.getCentroidX();
-        double dy = y - node.object.getCentroidY();
-        double dz = z - node.object.getCentroidZ();
-        double squared = dx * dx + dy * dy + dz * dz;
-        if (squared < bestSquaredDistance
-                || (squared == bestSquaredDistance
-                && (bestObject == null
-                || node.object.getIndex() < bestObject.getIndex()))) {
-            bestSquaredDistance = squared;
-            bestObject = node.object;
+    /** A new query over this tree with its own search state, for one worker thread. */
+    Query query() {
+        return new Query();
+    }
+
+    /** Search state for one thread; answers exactly as {@link NearestCentroid3D#nearest}. */
+    final class Query {
+        private SpatialObject3D bestObject;
+        private double bestSquaredDistance;
+
+        private Query() {
         }
 
-        double difference = coordinate(x, y, z, node.axis)
-                - coordinate(node.object, node.axis);
-        Node near = difference <= 0.0 ? node.left : node.right;
-        Node far = difference <= 0.0 ? node.right : node.left;
-        search(near, x, y, z);
-        if (difference * difference <= bestSquaredDistance) {
-            search(far, x, y, z);
+        SpatialObject3D nearest(double x, double y, double z) {
+            bestObject = null;
+            bestSquaredDistance = Double.POSITIVE_INFINITY;
+            search(root, x, y, z);
+            return bestObject;
+        }
+
+        private void search(Node node, double x, double y, double z) {
+            if (node == null) return;
+            double dx = x - node.object.getCentroidX();
+            double dy = y - node.object.getCentroidY();
+            double dz = z - node.object.getCentroidZ();
+            double squared = dx * dx + dy * dy + dz * dz;
+            if (squared < bestSquaredDistance
+                    || (squared == bestSquaredDistance
+                    && (bestObject == null
+                    || node.object.getIndex() < bestObject.getIndex()))) {
+                bestSquaredDistance = squared;
+                bestObject = node.object;
+            }
+
+            double difference = coordinate(x, y, z, node.axis)
+                    - coordinate(node.object, node.axis);
+            Node near = difference <= 0.0 ? node.left : node.right;
+            Node far = difference <= 0.0 ? node.right : node.left;
+            search(near, x, y, z);
+            if (difference * difference <= bestSquaredDistance) {
+                search(far, x, y, z);
+            }
         }
     }
 

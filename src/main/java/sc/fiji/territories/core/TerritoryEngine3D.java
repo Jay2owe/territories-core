@@ -42,10 +42,7 @@ public final class TerritoryEngine3D {
         Arrays.fill(owner, -1);
         assignOwnersByConnectedComponent(owner, objects, region);
 
-        Map<Integer, Integer> localByGlobal = new HashMap<Integer, Integer>();
-        for (int i = 0; i < objects.size(); i++) {
-            localByGlobal.put(objects.get(i).getIndex(), i);
-        }
+        int[] localByGlobal = localByGlobal(objects);
         long[] counts = new long[objects.size()];
         boolean[] edgeCells = new boolean[objects.size()];
         @SuppressWarnings("unchecked")
@@ -72,6 +69,24 @@ public final class TerritoryEngine3D {
                 cells,
                 regularity(cells, edgePolicy),
                 labelImage(owner, region));
+    }
+
+    /** Position in {@code objects} by global object index; -1 for any other index. */
+    private static int[] localByGlobal(List<SpatialObject3D> objects) {
+        int maximum = -1;
+        for (SpatialObject3D object : objects) {
+            maximum = Math.max(maximum, object.getIndex());
+        }
+        int[] result = new int[maximum + 1];
+        Arrays.fill(result, -1);
+        for (int i = 0; i < objects.size(); i++) {
+            result[objects.get(i).getIndex()] = i;
+        }
+        return result;
+    }
+
+    private static int local(int[] localByGlobal, int global) {
+        return global < localByGlobal.length ? localByGlobal[global] : -1;
     }
 
     private static List<SpatialObject3D> objectsInside(
@@ -163,18 +178,24 @@ public final class TerritoryEngine3D {
                 }
                 continue;
             }
+            // Each voxel's owner is independent of every other voxel's, so
+            // workers take disjoint runs of the component, each with its own
+            // query state over the shared tree.
             NearestCentroid3D nearest = new NearestCentroid3D(componentObjects);
-            for (int cursor = 0; cursor < component.size(); cursor++) {
-                int index = component.get(cursor);
-                int z = index / plane;
-                int remainder = index - z * plane;
-                int y = remainder / width;
-                int x = remainder - y * width;
-                owner[index] = nearest.nearest(
-                        (x + 0.5) * region.getPixelWidth(),
-                        (y + 0.5) * region.getPixelHeight(),
-                        (z + 0.5) * region.getPixelDepth()).getIndex();
-            }
+            Parallel.forRange(0, component.size(), (from, to) -> {
+                NearestCentroid3D.Query query = nearest.query();
+                for (int cursor = from; cursor < to; cursor++) {
+                    int index = component.get(cursor);
+                    int z = index / plane;
+                    int remainder = index - z * plane;
+                    int y = remainder / width;
+                    int x = remainder - y * width;
+                    owner[index] = query.nearest(
+                            (x + 0.5) * region.getPixelWidth(),
+                            (y + 0.5) * region.getPixelHeight(),
+                            (z + 0.5) * region.getPixelDepth()).getIndex();
+                }
+            });
         }
     }
 
@@ -193,7 +214,7 @@ public final class TerritoryEngine3D {
     private static void measure(
             int[] owner,
             RegionMask3D region,
-            Map<Integer, Integer> localByGlobal,
+            int[] localByGlobal,
             long[] counts,
             boolean[] edgeCells,
             Set<Integer>[] neighbors) {
@@ -205,8 +226,8 @@ public final class TerritoryEngine3D {
                 for (int x = 0; x < width; x++) {
                     int index = (z * height + y) * width + x;
                     if (!region.containsIndex(index) || owner[index] < 0) continue;
-                    Integer local = localByGlobal.get(owner[index]);
-                    if (local == null) continue;
+                    int local = local(localByGlobal, owner[index]);
+                    if (local < 0) continue;
                     counts[local]++;
                     if (touchesRegionBoundary(region, x, y, z)) edgeCells[local] = true;
                     connect(owner, region, localByGlobal, neighbors, x, y, z, x + 1, y, z);
@@ -230,7 +251,7 @@ public final class TerritoryEngine3D {
     private static void connect(
             int[] owner,
             RegionMask3D region,
-            Map<Integer, Integer> localByGlobal,
+            int[] localByGlobal,
             Set<Integer>[] neighbors,
             int x,
             int y,
@@ -246,9 +267,9 @@ public final class TerritoryEngine3D {
         int firstOwner = owner[firstIndex];
         int secondOwner = owner[secondIndex];
         if (firstOwner < 0 || secondOwner < 0 || firstOwner == secondOwner) return;
-        Integer firstLocal = localByGlobal.get(firstOwner);
-        Integer secondLocal = localByGlobal.get(secondOwner);
-        if (firstLocal == null || secondLocal == null) return;
+        int firstLocal = local(localByGlobal, firstOwner);
+        int secondLocal = local(localByGlobal, secondOwner);
+        if (firstLocal < 0 || secondLocal < 0) return;
         neighbors[firstLocal].add(secondOwner);
         neighbors[secondLocal].add(firstOwner);
     }
