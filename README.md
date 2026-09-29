@@ -4,10 +4,11 @@
 
 The Object Territories engine, as an embeddable module.
 
-**Status (2026-09-29): 0.2.0, shipping inside Object Territories 0.3.0.**
-63 tests green here. Density maps and 3D territory assignment now run in
-parallel with outputs bit-identical to 0.1.0; the plugin's 1,221 golden cases
-are unmoved, bit-for-bit.
+**Status (2026-09-29): 0.2.1, shipping inside Object Territories 0.3.1.**
+67 tests green here. 0.2.1 adds a cancellation check the long loops poll, so
+a caller can stop a density map or a 3D territory assignment part-way
+through; outputs are bit-identical to 0.2.0 and 0.1.0, and the plugin's
+1,221 golden cases are unmoved, bit-for-bit.
 
 **Pattern:** `../PLUGIN_CORE_PATTERN.md`
 **Depends on:** `net.imagej:ij` (provided) and `org.locationtech.jts:jts-core`
@@ -25,11 +26,12 @@ are unmoved, bit-for-bit.
 | `RegionMaskFactory3D` | positive-integer 3D mask → independent or unioned regions |
 | `TerritoryResult` / `TerritoryResult3D` / `DensityResult` / `InteractionMatrixResult` | result models — **no ImageJ tables** |
 | `EdgeCellPolicy` `RegionMode` `DensityWeighting` `DensityBoundaryMode` | the four options the engine itself reads |
+| `ComputationCancelledException` | thrown when a caller's cancellation check fires part-way through |
 
 Build and test:
 
 ```
-mvn -o test        # 63 tests
+mvn -o test        # 67 tests
 mvn -o install     # needed before Object Territories can build
 ```
 
@@ -46,7 +48,7 @@ object in" without the user installing Object Territories.
 <dependency>
   <groupId>io.github.jay2owe</groupId>
   <artifactId>territories-core</artifactId>
-  <version>0.2.0</version>
+  <version>0.2.1</version>
 </dependency>
 ```
 
@@ -112,6 +114,30 @@ One rule sets the thread count for the whole module: the
 `territories.parallelism` system property when it is positive, otherwise the
 available processors capped at 8. `-Dterritories.parallelism=1` runs every
 engine serially on the calling thread.
+
+## Cancellation
+
+Since 0.2.1, `DensityEngine.generate`, `DensityEngine3D.generate`,
+`TerritoryEngine3D.analyze` and `InteractionEngine.analyze` each have an
+overload taking a `java.util.function.BooleanSupplier` as the last argument.
+The engine polls it per image row, slice, kernel, object or permutation
+(every 4,096 voxels in the flat 3D passes), from its worker
+threads as well as the calling thread, and throws
+`ComputationCancelledException` as soon as it returns `true`. The supplier
+must therefore be thread-safe and cheap, such as a volatile read. A poll only
+reads, so a check that never fires gives output bit-identical to the
+overloads without one; `null` never cancels. `CancellationTest` checks both
+halves of that contract at 1 and 8 workers.
+
+```java
+AtomicBoolean stop = new AtomicBoolean();   // set from another thread to cancel
+DensityResult map = DensityEngine.generate(objects, region, "A", width, height,
+        pixelWidth, pixelHeight, "um", 40.0, DensityWeighting.OBJECT_COUNT,
+        DensityBoundaryMode.CORRECTED, stop::get);
+```
+
+Object Territories 0.3.1 wires this to Escape; in its tests a density map is
+stopped within a few milliseconds of the request.
 
 ## Citation
 

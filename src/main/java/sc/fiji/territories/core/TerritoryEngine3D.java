@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.function.BooleanSupplier;
 
 /**
  * Voxel-resolved 3D Voronoi territories using calibrated Euclidean distance.
@@ -31,6 +32,24 @@ public final class TerritoryEngine3D {
             List<SpatialObject3D> allObjects,
             RegionMask3D region,
             EdgeCellPolicy edgePolicy) {
+        return analyze(allObjects, region, edgePolicy, Cancellation.NEVER);
+    }
+
+    /**
+     * As {@link #analyze(List, RegionMask3D, EdgeCellPolicy)}, polling
+     * {@code cancelled} per slice and every 4,096 voxels (also from worker
+     * threads, so it must be thread-safe) and throwing {@link ComputationCancelledException} as soon as it returns
+     * {@code true}. The result, when there is one, is bit-identical to the
+     * overload without a check. {@code null} never cancels.
+     *
+     * @since 0.2.1
+     */
+    public static TerritoryResult3D analyze(
+            List<SpatialObject3D> allObjects,
+            RegionMask3D region,
+            EdgeCellPolicy edgePolicy,
+            BooleanSupplier cancelled) {
+        BooleanSupplier stop = Cancellation.orNever(cancelled);
         if (allObjects == null) throw new IllegalArgumentException("objects must not be null");
         if (region == null) throw new IllegalArgumentException("region must not be null");
         if (edgePolicy == null) throw new IllegalArgumentException("edge policy must not be null");
@@ -40,7 +59,8 @@ public final class TerritoryEngine3D {
         int voxelTotal = region.getWidth() * region.getHeight() * region.getDepth();
         int[] owner = new int[voxelTotal];
         Arrays.fill(owner, -1);
-        assignOwnersByConnectedComponent(owner, objects, region);
+        Cancellation.check(stop);
+        assignOwnersByConnectedComponent(owner, objects, region, stop);
 
         int[] localByGlobal = localByGlobal(objects);
         long[] counts = new long[objects.size()];
@@ -48,7 +68,8 @@ public final class TerritoryEngine3D {
         @SuppressWarnings("unchecked")
         Set<Integer>[] neighbors = new Set[objects.size()];
         for (int i = 0; i < neighbors.length; i++) neighbors[i] = new TreeSet<Integer>();
-        measure(owner, region, localByGlobal, counts, edgeCells, neighbors);
+        measure(owner, region, localByGlobal, counts, edgeCells, neighbors, stop);
+        Cancellation.check(stop);
 
         double voxelVolume = region.getPixelWidth()
                 * region.getPixelHeight() * region.getPixelDepth();
@@ -119,7 +140,10 @@ public final class TerritoryEngine3D {
     }
 
     private static void assignOwnersByConnectedComponent(
-            int[] owner, List<SpatialObject3D> objects, RegionMask3D region) {
+            int[] owner,
+            List<SpatialObject3D> objects,
+            RegionMask3D region,
+            BooleanSupplier stop) {
         int width = region.getWidth();
         int height = region.getHeight();
         int plane = width * height;
@@ -144,6 +168,7 @@ public final class TerritoryEngine3D {
         }
 
         for (int start = 0; start < owner.length; start++) {
+            if ((start & Cancellation.POLL_MASK) == 0) Cancellation.check(stop);
             if (owner[start] != unvisited) continue;
             IntBuffer component = new IntBuffer();
             ArrayList<SpatialObject3D> componentObjects =
@@ -151,6 +176,7 @@ public final class TerritoryEngine3D {
             component.add(start);
             owner[start] = queued;
             for (int cursor = 0; cursor < component.size(); cursor++) {
+                if ((cursor & Cancellation.POLL_MASK) == 0) Cancellation.check(stop);
                 int index = component.get(cursor);
                 List<SpatialObject3D> atVoxel = objectsByVoxel.get(index);
                 if (atVoxel != null) componentObjects.addAll(atVoxel);
@@ -185,6 +211,7 @@ public final class TerritoryEngine3D {
             Parallel.forRange(0, component.size(), (from, to) -> {
                 NearestCentroid3D.Query query = nearest.query();
                 for (int cursor = from; cursor < to; cursor++) {
+                    if ((cursor & Cancellation.POLL_MASK) == 0) Cancellation.check(stop);
                     int index = component.get(cursor);
                     int z = index / plane;
                     int remainder = index - z * plane;
@@ -217,11 +244,13 @@ public final class TerritoryEngine3D {
             int[] localByGlobal,
             long[] counts,
             boolean[] edgeCells,
-            Set<Integer>[] neighbors) {
+            Set<Integer>[] neighbors,
+            BooleanSupplier stop) {
         int width = region.getWidth();
         int height = region.getHeight();
         int depth = region.getDepth();
         for (int z = 0; z < depth; z++) {
+            Cancellation.check(stop);
             for (int y = 0; y < height; y++) {
                 for (int x = 0; x < width; x++) {
                     int index = (z * height + y) * width + x;

@@ -12,6 +12,7 @@ import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 
 /** Permutation-tested interaction matrix for an undirected Voronoi graph. */
 public final class InteractionEngine {
@@ -24,6 +25,25 @@ public final class InteractionEngine {
             List<String> typeNames,
             int permutations,
             long seed) {
+        return analyze(cells, typeNames, permutations, seed, Cancellation.NEVER);
+    }
+
+    /**
+     * As {@link #analyze(List, List, int, long)}, polling {@code cancelled}
+     * before every permutation and throwing
+     * {@link ComputationCancelledException} as soon as it returns
+     * {@code true}. The result, when there is one, is identical to the
+     * overload without a check. {@code null} never cancels.
+     *
+     * @since 0.2.1
+     */
+    public static InteractionMatrixResult analyze(
+            List<? extends NeighborhoodCell> cells,
+            List<String> typeNames,
+            int permutations,
+            long seed,
+            BooleanSupplier cancelled) {
+        BooleanSupplier stop = Cancellation.orNever(cancelled);
         if (cells == null) throw new IllegalArgumentException("cells must not be null");
         if (typeNames == null || typeNames.isEmpty()) {
             throw new IllegalArgumentException("at least one type name is required");
@@ -50,7 +70,7 @@ public final class InteractionEngine {
         List<Edge> edges = edges(cells, localByGlobal);
         int[][] observed = count(edges, observedTypes, typeCount);
         int[][][] nullCounts = nullCounts(
-                edges, observedTypes, typeCount, permutations, seed);
+                edges, observedTypes, typeCount, permutations, seed, stop);
 
         double[][] expected = new double[typeCount][typeCount];
         double[][] standardDeviation = new double[typeCount][typeCount];
@@ -137,13 +157,15 @@ public final class InteractionEngine {
             int[] observedTypes,
             final int typeCount,
             int permutations,
-            long seed) {
+            long seed,
+            BooleanSupplier stop) {
         final int[][][] result = new int[permutations][typeCount][typeCount];
         int workers = Parallel.workers(permutations);
         int[] shuffled = observedTypes.clone();
         Random random = new Random(seed);
         if (workers == 1) {
             for (int p = 0; p < permutations; p++) {
+                Cancellation.check(stop);
                 shuffle(shuffled, random);
                 result[p] = count(edges, shuffled, typeCount);
             }
@@ -159,6 +181,7 @@ public final class InteractionEngine {
         try {
             while (completed < permutations) {
                 while (submitted < permutations && submitted - completed < window) {
+                    Cancellation.check(stop);
                     final int index = submitted++;
                     shuffle(shuffled, random);
                     final int[] assignedTypes = shuffled.clone();

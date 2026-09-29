@@ -10,6 +10,7 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.BooleanSupplier;
 
 /**
  * Voxel-resolved, isotropic-in-physical-space 3D Gaussian density estimation.
@@ -28,6 +29,31 @@ public final class DensityEngine3D {
             double requestedBandwidth,
             DensityWeighting weighting,
             DensityBoundaryMode boundaryMode) {
+        return generate(
+                allObjects, region, typeName, requestedBandwidth, weighting, boundaryMode,
+                Cancellation.NEVER);
+    }
+
+    /**
+     * As {@link #generate(List, RegionMask3D, String, double, DensityWeighting,
+     * DensityBoundaryMode)}, polling {@code cancelled} per slice, kernel and
+     * object and every 4,096 voxels (also from worker threads, so it must be
+     * thread-safe) and throwing {@link ComputationCancelledException} as soon
+     * as it returns {@code true}. The result, when there is one, is
+     * bit-identical to the overload without a check. {@code null} never
+     * cancels.
+     *
+     * @since 0.2.1
+     */
+    public static DensityResult3D generate(
+            List<SpatialObject3D> allObjects,
+            RegionMask3D region,
+            String typeName,
+            double requestedBandwidth,
+            DensityWeighting weighting,
+            DensityBoundaryMode boundaryMode,
+            BooleanSupplier cancelled) {
+        BooleanSupplier stop = Cancellation.orNever(cancelled);
         if (allObjects == null) throw new IllegalArgumentException("objects must not be null");
         if (region == null) throw new IllegalArgumentException("region must not be null");
         if (typeName == null || typeName.trim().isEmpty()) {
@@ -41,7 +67,8 @@ public final class DensityEngine3D {
         }
 
         List<SpatialObject3D> objects = admittedObjects(allObjects, region, typeName);
-        int[] components = connectedComponents(region);
+        Cancellation.check(stop);
+        int[] components = connectedComponents(region, stop);
         double bandwidth = requestedBandwidth > 0.0
                 ? requestedBandwidth
                 : automaticBandwidth(
@@ -49,10 +76,13 @@ public final class DensityEngine3D {
                         region.getPixelWidth(),
                         region.getPixelHeight(),
                         region.getPixelDepth());
-        float[][] pixels = initialiseVolume(region);
+        float[][] pixels = initialiseVolume(region, stop);
         List<Kernel> kernels = kernels(
-                objects, region, components, bandwidth, weighting, boundaryMode);
-        accumulate(kernels, pixels, region, components, bandwidth);
+                objects, region, components, bandwidth, weighting, boundaryMode, stop);
+        accumulate(kernels, pixels, region, components, bandwidth, stop);
+        Map<Integer, Double> localDensity =
+                localDensity(objects, kernels, region, components, bandwidth, stop);
+        Cancellation.check(stop);
 
         ImagePlus image = image(pixels, region, typeName);
         return new DensityResult3D(
@@ -62,7 +92,7 @@ public final class DensityEngine3D {
                 boundaryMode,
                 bandwidth,
                 image,
-                localDensity(objects, kernels, region, components, bandwidth));
+                localDensity);
     }
 
     private static List<SpatialObject3D> admittedObjects(
@@ -79,10 +109,11 @@ public final class DensityEngine3D {
         return result;
     }
 
-    private static float[][] initialiseVolume(RegionMask3D region) {
+    private static float[][] initialiseVolume(RegionMask3D region, BooleanSupplier stop) {
         int plane = region.getWidth() * region.getHeight();
         float[][] result = new float[region.getDepth()][plane];
         for (int z = 0; z < region.getDepth(); z++) {
+            Cancellation.check(stop);
             for (int y = 0; y < region.getHeight(); y++) {
                 for (int x = 0; x < region.getWidth(); x++) {
                     if (!region.contains(x, y, z)) {
@@ -105,12 +136,14 @@ public final class DensityEngine3D {
             int[] components,
             double bandwidth,
             DensityWeighting weighting,
-            DensityBoundaryMode boundaryMode) {
+            DensityBoundaryMode boundaryMode,
+            BooleanSupplier stop) {
         int count = objects.size();
         Kernel[] computed = new Kernel[count];
         RuntimeException[] failures = new RuntimeException[count];
         Parallel.forRange(0, count, (from, to) -> {
             for (int i = from; i < to; i++) {
+                Cancellation.check(stop);
                 try {
                     computed[i] = kernel(
                             objects.get(i), region, components, bandwidth,
@@ -178,12 +211,14 @@ public final class DensityEngine3D {
             float[][] pixels,
             RegionMask3D region,
             int[] components,
-            double bandwidth) {
+            double bandwidth,
+            BooleanSupplier stop) {
         int height = region.getHeight();
         Parallel.forRange(0, region.getDepth() * height, (fromRow, toRow) -> {
             int firstZ = fromRow / height;
             int lastZ = (toRow - 1) / height;
             for (Kernel kernel : kernels) {
+                Cancellation.check(stop);
                 int fromZ = Math.max(kernel.bounds.minimumZ, firstZ);
                 int toZ = Math.min(kernel.bounds.maximumZ, lastZ);
                 for (int z = fromZ; z <= toZ; z++) {
@@ -256,12 +291,14 @@ public final class DensityEngine3D {
             List<Kernel> kernels,
             RegionMask3D region,
             int[] components,
-            double bandwidth) {
+            double bandwidth,
+            BooleanSupplier stop) {
         double inverseTwoBandwidthSquared = 1.0 / (2.0 * bandwidth * bandwidth);
         double radius = RADIUS_IN_SIGMAS * bandwidth;
         double[] densities = new double[objects.size()];
         Parallel.forRange(0, objects.size(), (from, to) -> {
             for (int i = from; i < to; i++) {
+                Cancellation.check(stop);
                 SpatialObject3D selected = objects.get(i);
                 double density = 0.0;
                 int selectedComponent = componentAtObject(selected, region, components);
@@ -298,7 +335,7 @@ public final class DensityEngine3D {
         return components[(z * region.getHeight() + y) * region.getWidth() + x];
     }
 
-    private static int[] connectedComponents(RegionMask3D region) {
+    private static int[] connectedComponents(RegionMask3D region, BooleanSupplier stop) {
         int width = region.getWidth();
         int height = region.getHeight();
         int depth = region.getDepth();
@@ -309,12 +346,14 @@ public final class DensityEngine3D {
         int[] queue = new int[total];
         int component = 0;
         for (int start = 0; start < total; start++) {
+            if ((start & Cancellation.POLL_MASK) == 0) Cancellation.check(stop);
             if (!region.containsIndex(start) || components[start] >= 0) continue;
             int read = 0;
             int write = 0;
             queue[write++] = start;
             components[start] = component;
             while (read < write) {
+                if ((read & Cancellation.POLL_MASK) == 0) Cancellation.check(stop);
                 int index = queue[read++];
                 int z = index / plane;
                 int remainder = index - z * plane;

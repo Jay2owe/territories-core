@@ -17,6 +17,7 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.BooleanSupplier;
 
 /**
  * Two-dimensional Gaussian kernel density estimation in calibrated units.
@@ -45,6 +46,36 @@ public final class DensityEngine {
             double requestedBandwidthMicrons,
             DensityWeighting weighting,
             DensityBoundaryMode boundaryMode) {
+        return generate(
+                allObjects, region, typeName, width, height, pixelWidth, pixelHeight,
+                spatialUnit, requestedBandwidthMicrons, weighting, boundaryMode,
+                Cancellation.NEVER);
+    }
+
+    /**
+     * As {@link #generate(List, SpatialRegion2D, String, int, int, double, double,
+     * String, double, DensityWeighting, DensityBoundaryMode)}, polling
+     * {@code cancelled} per image row, kernel and object (also from worker
+     * threads, so it must be thread-safe) and throwing {@link ComputationCancelledException} as soon as it returns
+     * {@code true}. The result, when there is one, is bit-identical to the
+     * overload without a check. {@code null} never cancels.
+     *
+     * @since 0.2.1
+     */
+    public static DensityResult generate(
+            List<SpatialObject2D> allObjects,
+            SpatialRegion2D region,
+            String typeName,
+            int width,
+            int height,
+            double pixelWidth,
+            double pixelHeight,
+            String spatialUnit,
+            double requestedBandwidthMicrons,
+            DensityWeighting weighting,
+            DensityBoundaryMode boundaryMode,
+            BooleanSupplier cancelled) {
+        BooleanSupplier stop = Cancellation.orNever(cancelled);
         if (allObjects == null) throw new IllegalArgumentException("objects must not be null");
         if (region == null) throw new IllegalArgumentException("region must not be null");
         if (typeName == null || typeName.trim().isEmpty()) {
@@ -70,8 +101,9 @@ public final class DensityEngine {
                 ? requestedBandwidthMicrons
                 : automaticBandwidth(objects, pixelWidth, pixelHeight);
 
+        Cancellation.check(stop);
         RasterDomain raster = rasterDomain(
-                domain, width, height, pixelWidth, pixelHeight);
+                domain, width, height, pixelWidth, pixelHeight, stop);
         float[] pixels = new float[width * height];
         for (int i = 0; i < pixels.length; i++) {
             if (raster.componentByPixel[i] < 0) pixels[i] = Float.NaN;
@@ -80,10 +112,10 @@ public final class DensityEngine {
         int[] componentOf = new int[objects.size()];
         List<Kernel> kernels = kernels(
                 objects, componentOf, raster, width, height, pixelWidth, pixelHeight,
-                bandwidth, weighting, boundaryMode);
+                bandwidth, weighting, boundaryMode, stop);
         accumulate(
                 kernels, pixels, raster.componentByPixel, width, height,
-                pixelWidth, pixelHeight, bandwidth);
+                pixelWidth, pixelHeight, bandwidth, stop);
 
         FloatProcessor processor = new FloatProcessor(width, height, pixels);
         String title = safe(typeName) + "_" + safe(region.getName()) + "_Density";
@@ -95,7 +127,8 @@ public final class DensityEngine {
                 spatialUnit == null || spatialUnit.trim().isEmpty() ? "um" : spatialUnit);
 
         Map<Integer, Double> localDensity = localDensity(
-                objects, componentOf, kernels, bandwidth);
+                objects, componentOf, kernels, bandwidth, stop);
+        Cancellation.check(stop);
         return new DensityResult(
                 region.getName(), typeName, weighting, boundaryMode,
                 bandwidth, image, localDensity);
@@ -121,7 +154,8 @@ public final class DensityEngine {
             int width,
             int height,
             double pixelWidth,
-            double pixelHeight) {
+            double pixelHeight,
+            BooleanSupplier stop) {
         List<Geometry> geometries = polygonalComponents(domain);
         ArrayList<PreparedGeometry> prepared =
                 new ArrayList<PreparedGeometry>(geometries.size());
@@ -147,6 +181,7 @@ public final class DensityEngine {
             Parallel.forRange(minimumY, maximumY + 1, (fromY, toY) -> {
                 PreparedGeometry rows = PreparedGeometryFactory.prepare(geometry);
                 for (int y = fromY; y < toY; y++) {
+                    Cancellation.check(stop);
                     double physicalY = (y + 0.5) * pixelHeight;
                     for (int x = minimumX; x <= maximumX; x++) {
                         int index = y * width + x;
@@ -179,11 +214,13 @@ public final class DensityEngine {
             double pixelHeight,
             double bandwidth,
             DensityWeighting weighting,
-            DensityBoundaryMode boundaryMode) {
+            DensityBoundaryMode boundaryMode,
+            BooleanSupplier stop) {
         int count = objects.size();
         Kernel[] computed = new Kernel[count];
         RuntimeException[] failures = new RuntimeException[count];
         for (int i = 0; i < count; i++) {
+            Cancellation.check(stop);
             try {
                 componentOf[i] = componentAtObject(objects.get(i), raster);
             } catch (RuntimeException failure) {
@@ -193,6 +230,7 @@ public final class DensityEngine {
         Parallel.forRange(0, count, (from, to) -> {
             for (int i = from; i < to; i++) {
                 if (failures[i] != null) continue;
+                Cancellation.check(stop);
                 try {
                     computed[i] = kernel(
                             objects.get(i), componentOf[i], raster, width, height,
@@ -269,9 +307,11 @@ public final class DensityEngine {
             int height,
             double pixelWidth,
             double pixelHeight,
-            double bandwidth) {
+            double bandwidth,
+            BooleanSupplier stop) {
         Parallel.forRange(0, height, (fromY, toY) -> {
             for (Kernel kernel : kernels) {
+                Cancellation.check(stop);
                 accumulate(
                         kernel, pixels, components, width,
                         pixelWidth, pixelHeight, bandwidth,
@@ -332,12 +372,14 @@ public final class DensityEngine {
             List<SpatialObject2D> objects,
             int[] componentOf,
             List<Kernel> kernels,
-            double bandwidth) {
+            double bandwidth,
+            BooleanSupplier stop) {
         double inverseTwoBandwidthSquared = 1.0 / (2.0 * bandwidth * bandwidth);
         double radius = KERNEL_RADIUS_IN_SIGMAS * bandwidth;
         double[] densities = new double[objects.size()];
         Parallel.forRange(0, objects.size(), (from, to) -> {
             for (int i = from; i < to; i++) {
+                Cancellation.check(stop);
                 SpatialObject2D selected = objects.get(i);
                 double density = 0.0;
                 int selectedComponent = componentOf[i];
