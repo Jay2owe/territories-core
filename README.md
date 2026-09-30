@@ -4,11 +4,12 @@
 
 The Object Territories engine, as an embeddable module.
 
-**Status (2026-09-29): 0.2.1, shipping inside Object Territories 0.3.1.**
-67 tests green here. 0.2.1 adds a cancellation check the long loops poll, so
-a caller can stop a density map or a 3D territory assignment part-way
-through; outputs are bit-identical to 0.2.0 and 0.1.0, and the plugin's
-1,221 golden cases are unmoved, bit-for-bit.
+**Status (2026-09-30): 0.2.2, released; Object Territories 0.3.1 ships 0.2.1.**
+69 tests green here. 0.2.2 assigns 3D territories tile by tile instead of one
+k-d tree search per voxel: 1.8x faster end to end in Object Colocalization
+Suite's territory benchmark (3.5x on one processor), outputs bit-identical to
+0.2.1, 0.2.0 and 0.1.0 (see `CHANGELOG.md`). The plugin's 1,221 golden cases
+are unmoved against it, bit-for-bit.
 
 **Pattern:** `../PLUGIN_CORE_PATTERN.md`
 **Depends on:** `net.imagej:ij` (provided) and `org.locationtech.jts:jts-core`
@@ -48,7 +49,7 @@ object in" without the user installing Object Territories.
 <dependency>
   <groupId>io.github.jay2owe</groupId>
   <artifactId>territories-core</artifactId>
-  <version>0.2.1</version>
+  <version>0.2.2</version>
 </dependency>
 ```
 
