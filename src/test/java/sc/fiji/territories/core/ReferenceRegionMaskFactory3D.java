@@ -10,10 +10,10 @@ import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
 
-/** Parses positive integer labels in a 3D mask into independent or union regions. */
-public final class RegionMaskFactory3D {
+/** The 0.2.1 {@code RegionMaskFactory3D}, kept verbatim (renamed) as a test reference. */
+final class ReferenceRegionMaskFactory3D {
 
-    private RegionMaskFactory3D() {
+    private ReferenceRegionMaskFactory3D() {
     }
 
     public static List<RegionMask3D> create(ImagePlus mask, RegionMode mode) {
@@ -24,29 +24,7 @@ public final class RegionMaskFactory3D {
         int[] labels = new int[width * height * depth];
         Set<Integer> unique = new TreeSet<Integer>();
         ImageStack stack = mask.getStack();
-        // A run of voxels with one value adds it to the set once; the set
-        // ends up the same, without boxing and inserting every voxel.
-        int lastAdded = 0;
-        boolean plain = stack.getClass() == ImageStack.class && !stack.isVirtual();
         for (int z = 0; z < depth; z++) {
-            // Byte and short pixels are always non-negative integers, exactly
-            // as getf returns them; an in-memory stack's arrays are read
-            // directly, without building a processor per slice.
-            Object pixels = plain ? stack.getPixels(z + 1) : null;
-            if (pixels instanceof short[] || pixels instanceof byte[]) {
-                short[] shorts = pixels instanceof short[] ? (short[]) pixels : null;
-                byte[] bytes = pixels instanceof byte[] ? (byte[]) pixels : null;
-                for (int i = 0; i < width * height; i++) {
-                    int value = shorts != null ? shorts[i] & 0xffff : bytes[i] & 0xff;
-                    if (value == 0) continue;
-                    labels[z * width * height + i] = value;
-                    if (value != lastAdded) {
-                        unique.add(value);
-                        lastAdded = value;
-                    }
-                }
-                continue;
-            }
             ImageProcessor processor = stack.getProcessor(z + 1);
             for (int y = 0; y < height; y++) {
                 for (int x = 0; x < width; x++) {
@@ -60,10 +38,7 @@ public final class RegionMaskFactory3D {
                     }
                     int value = (int) raw;
                     labels[(z * height + y) * width + x] = value;
-                    if (value != lastAdded) {
-                        unique.add(value);
-                        lastAdded = value;
-                    }
+                    unique.add(value);
                 }
             }
         }

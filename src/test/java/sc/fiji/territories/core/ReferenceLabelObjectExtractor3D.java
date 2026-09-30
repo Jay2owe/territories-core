@@ -10,10 +10,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/** Extracts calibrated centroids and volumes from one 3D label stack. */
-public final class LabelObjectExtractor3D {
+/** The 0.2.1 {@code LabelObjectExtractor3D}, kept verbatim (renamed) as a test reference. */
+final class ReferenceLabelObjectExtractor3D {
 
-    private LabelObjectExtractor3D() {
+    private ReferenceLabelObjectExtractor3D() {
     }
 
     public static List<SpatialObject3D> extract(
@@ -29,29 +29,12 @@ public final class LabelObjectExtractor3D {
         ImageStack stack = labels.getStack();
         LinkedHashMap<Long, Accumulator> objects =
                 new LinkedHashMap<Long, Accumulator>();
-        // Neighbouring voxels usually share a label, so the last label's
-        // totals are kept at hand and the map is consulted only when the label
-        // changes. Objects still enter the map at their first voxel, so their
-        // order (and index) is unchanged, and every voxel is added as before.
-        Accumulator accumulator = null;
-        long accumulatorLabel = 0L;
 
-        boolean plain = stack.getClass() == ImageStack.class && !stack.isVirtual();
         for (int z = 0; z < stack.getSize(); z++) {
-            // Byte and short pixels of an in-memory stack are read from its
-            // arrays: the unsigned value getf returns, never an invalid label.
-            Object pixels = plain ? stack.getPixels(z + 1) : null;
-            short[] shorts = pixels instanceof short[] ? (short[]) pixels : null;
-            byte[] bytes = pixels instanceof byte[] ? (byte[]) pixels : null;
-            ImageProcessor processor = shorts == null && bytes == null
-                    ? stack.getProcessor(z + 1) : null;
-            int width = processor == null ? stack.getWidth() : processor.getWidth();
-            int height = processor == null ? stack.getHeight() : processor.getHeight();
-            for (int y = 0; y < height; y++) {
-                for (int x = 0; x < width; x++) {
-                    double raw = shorts != null ? shorts[y * width + x] & 0xffff
-                            : bytes != null ? bytes[y * width + x] & 0xff
-                            : processor.getf(x, y);
+            ImageProcessor processor = stack.getProcessor(z + 1);
+            for (int y = 0; y < processor.getHeight(); y++) {
+                for (int x = 0; x < processor.getWidth(); x++) {
+                    double raw = processor.getf(x, y);
                     if (raw == 0.0) continue;
                     if (!Double.isFinite(raw)
                             || raw < 0.0
@@ -63,13 +46,10 @@ public final class LabelObjectExtractor3D {
                                         + x + ", " + y + ", " + z + "): " + raw);
                     }
                     long label = (long) raw;
-                    if (accumulator == null || label != accumulatorLabel) {
-                        accumulator = objects.get(label);
-                        if (accumulator == null) {
-                            accumulator = new Accumulator();
-                            objects.put(label, accumulator);
-                        }
-                        accumulatorLabel = label;
+                    Accumulator accumulator = objects.get(label);
+                    if (accumulator == null) {
+                        accumulator = new Accumulator();
+                        objects.put(label, accumulator);
                     }
                     accumulator.count++;
                     accumulator.sumX += x + 0.5;
@@ -87,7 +67,7 @@ public final class LabelObjectExtractor3D {
                 new ArrayList<SpatialObject3D>(objects.size());
         int index = firstObjectIndex;
         for (Map.Entry<Long, Accumulator> entry : objects.entrySet()) {
-            accumulator = entry.getValue();
+            Accumulator accumulator = entry.getValue();
             result.add(new SpatialObject3D(
                     index++,
                     typeIndex,

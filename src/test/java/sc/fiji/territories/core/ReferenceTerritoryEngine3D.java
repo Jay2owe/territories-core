@@ -17,15 +17,19 @@ import java.util.TreeSet;
 import java.util.function.BooleanSupplier;
 
 /**
- * Voxel-resolved 3D Voronoi territories using calibrated Euclidean distance.
+ * The 0.2.1 {@code TerritoryEngine3D}, kept verbatim (renamed) as the
+ * reference {@link TerritoryEngine3DTileEquivalenceTest} compares against: it
+ * answers every voxel with the k-d tree. Not used by the engine.
+ *
+ * <p>Voxel-resolved 3D Voronoi territories using calibrated Euclidean distance.
  *
  * <p>Territories share a neighbourhood edge only when voxels meet across a
  * face (6-connectivity). Results therefore remain resolution-dependent but are
  * genuinely volumetric and never projection-based.
  */
-public final class TerritoryEngine3D {
+final class ReferenceTerritoryEngine3D {
 
-    private TerritoryEngine3D() {
+    private ReferenceTerritoryEngine3D() {
     }
 
     public static TerritoryResult3D analyze(
@@ -204,9 +208,6 @@ public final class TerritoryEngine3D {
                 }
                 continue;
             }
-            if (assignByTiles(owner, component, componentObjects, region, stop, queued)) {
-                continue;
-            }
             // Each voxel's owner is independent of every other voxel's, so
             // workers take disjoint runs of the component, each with its own
             // query state over the shared tree.
@@ -227,174 +228,6 @@ public final class TerritoryEngine3D {
                 }
             });
         }
-    }
-
-    /** Tile edge, in voxels, for {@link #assignByTiles}; tiles are one slice deep. */
-    private static final int TILE = 16;
-
-    /**
-     * Relative slack on the tile candidate test. The test is already safe as
-     * computed: rounding is monotone, so an object's rounded distance to the
-     * nearest point of a tile's box is never above its rounded distance to
-     * any voxel in the tile, and the bound object's rounded distance to any
-     * voxel never exceeds its rounded farthest distance. The slack only lets
-     * extra objects in; it can never leave the winner out.
-     */
-    private static final double CANDIDATE_SLACK = 1.0e-9;
-
-    /**
-     * Assigns every voxel of a component that fills much of its bounding box,
-     * tile by tile, and returns {@code true}; otherwise returns {@code false}
-     * and assigns nothing, leaving the k-d tree path to do it.
-     *
-     * <p>The answer per voxel is exactly the k-d tree's: the object with the
-     * smallest squared distance {@code dx * dx + dy * dy + dz * dz}, computed
-     * with the same operations on the same voxel-centre coordinates, lowest
-     * global index on ties. What changes is how many objects each voxel is
-     * compared with. For one tile, the object whose farthest point of the
-     * tile's box is nearest sets a bound {@code U}; no voxel in the tile can
-     * be nearer to any object than that object is, so only objects whose
-     * nearest point of the box is within {@code U} (plus slack for rounding)
-     * can win anywhere in the tile. Each voxel then compares just those.
-     */
-    private static boolean assignByTiles(
-            final int[] owner,
-            IntBuffer component,
-            List<SpatialObject3D> objects,
-            RegionMask3D region,
-            final BooleanSupplier stop,
-            final int queued) {
-        final int width = region.getWidth();
-        final int height = region.getHeight();
-        final int plane = width * height;
-        int minX = Integer.MAX_VALUE;
-        int minY = Integer.MAX_VALUE;
-        int minZ = Integer.MAX_VALUE;
-        int maxX = -1;
-        int maxY = -1;
-        int maxZ = -1;
-        for (int cursor = 0; cursor < component.size(); cursor++) {
-            int index = component.get(cursor);
-            int z = index / plane;
-            int remainder = index - z * plane;
-            int y = remainder / width;
-            int x = remainder - y * width;
-            if (x < minX) minX = x;
-            if (x > maxX) maxX = x;
-            if (y < minY) minY = y;
-            if (y > maxY) maxY = y;
-            if (z < minZ) minZ = z;
-            if (z > maxZ) maxZ = z;
-        }
-        final int tilesX = (maxX - minX) / TILE + 1;
-        final int tilesY = (maxY - minY) / TILE + 1;
-        final int slices = maxZ - minZ + 1;
-        long box = (long) (maxX - minX + 1) * (maxY - minY + 1) * slices;
-        long tiles = (long) tilesX * tilesY * slices;
-        // Tiles pay a pass over the box and one pass over the objects per
-        // tile; below these densities the k-d tree is the cheaper route.
-        if (component.size() * 4L < box
-                || (long) objects.size() * tiles > 16L * component.size()
-                || tiles > Integer.MAX_VALUE) {
-            return false;
-        }
-
-        final int count = objects.size();
-        final double[] ox = new double[count];
-        final double[] oy = new double[count];
-        final double[] oz = new double[count];
-        final int[] globalIndex = new int[count];
-        for (int i = 0; i < count; i++) {
-            SpatialObject3D object = objects.get(i);
-            ox[i] = object.getCentroidX();
-            oy[i] = object.getCentroidY();
-            oz[i] = object.getCentroidZ();
-            globalIndex[i] = object.getIndex();
-        }
-        final double pixelWidth = region.getPixelWidth();
-        final double pixelHeight = region.getPixelHeight();
-        final double pixelDepth = region.getPixelDepth();
-        final int originX = minX;
-        final int originY = minY;
-        final int originZ = minZ;
-        final int lastX = maxX;
-        final int lastY = maxY;
-        Parallel.forRange(0, (int) tiles, (from, to) -> {
-            int[] candidates = new int[count];
-            for (int tile = from; tile < to; tile++) {
-                if (((tile - from) & 15) == 0) Cancellation.check(stop);
-                int tileX = tile % tilesX;
-                int rest = tile / tilesX;
-                int tileY = rest % tilesY;
-                int z = originZ + rest / tilesY;
-                int x0 = originX + tileX * TILE;
-                int y0 = originY + tileY * TILE;
-                int x1 = Math.min(x0 + TILE - 1, lastX);
-                int y1 = Math.min(y0 + TILE - 1, lastY);
-                boolean any = false;
-                for (int y = y0; y <= y1 && !any; y++) {
-                    int row = z * plane + y * width;
-                    for (int x = x0; x <= x1; x++) {
-                        if (owner[row + x] == queued) {
-                            any = true;
-                            break;
-                        }
-                    }
-                }
-                if (!any) continue;
-
-                // The box holding every voxel-centre coordinate of the tile,
-                // from the same expressions the voxels use below.
-                double qx0 = (x0 + 0.5) * pixelWidth;
-                double qx1 = (x1 + 0.5) * pixelWidth;
-                double qy0 = (y0 + 0.5) * pixelHeight;
-                double qy1 = (y1 + 0.5) * pixelHeight;
-                double qz = (z + 0.5) * pixelDepth;
-                double bound = Double.POSITIVE_INFINITY;
-                for (int i = 0; i < count; i++) {
-                    double fx = Math.max(Math.abs(ox[i] - qx0), Math.abs(ox[i] - qx1));
-                    double fy = Math.max(Math.abs(oy[i] - qy0), Math.abs(oy[i] - qy1));
-                    double fz = oz[i] - qz;
-                    double farthest = fx * fx + fy * fy + fz * fz;
-                    if (farthest < bound) bound = farthest;
-                }
-                double limit = bound * (1.0 + CANDIDATE_SLACK) + Double.MIN_NORMAL;
-                int candidateCount = 0;
-                for (int i = 0; i < count; i++) {
-                    double nx = ox[i] < qx0 ? qx0 - ox[i] : ox[i] > qx1 ? ox[i] - qx1 : 0.0;
-                    double ny = oy[i] < qy0 ? qy0 - oy[i] : oy[i] > qy1 ? oy[i] - qy1 : 0.0;
-                    double nz = oz[i] - qz;
-                    if (nx * nx + ny * ny + nz * nz <= limit) candidates[candidateCount++] = i;
-                }
-
-                for (int y = y0; y <= y1; y++) {
-                    int row = z * plane + y * width;
-                    double qy = (y + 0.5) * pixelHeight;
-                    for (int x = x0; x <= x1; x++) {
-                        int index = row + x;
-                        if (owner[index] != queued) continue;
-                        double qx = (x + 0.5) * pixelWidth;
-                        int best = -1;
-                        double bestSquaredDistance = Double.POSITIVE_INFINITY;
-                        for (int c = 0; c < candidateCount; c++) {
-                            int i = candidates[c];
-                            double dx = qx - ox[i];
-                            double dy = qy - oy[i];
-                            double dz = qz - oz[i];
-                            double squared = dx * dx + dy * dy + dz * dz;
-                            if (squared < bestSquaredDistance
-                                    || (squared == bestSquaredDistance
-                                    && (best < 0 || globalIndex[i] < globalIndex[best]))) {
-                                bestSquaredDistance = squared;
-                                best = i;
-                            }
-                        }
-                        owner[index] = globalIndex[best];
-                    }
-                }
-            }
-        });
-        return true;
     }
 
     private static void queue(
@@ -429,11 +262,7 @@ public final class TerritoryEngine3D {
                     int local = local(localByGlobal, owner[index]);
                     if (local < 0) continue;
                     counts[local]++;
-                    // Once a cell is known to touch the boundary, further
-                    // voxels cannot change the flag, so they skip the test.
-                    if (!edgeCells[local] && touchesRegionBoundary(region, x, y, z)) {
-                        edgeCells[local] = true;
-                    }
+                    if (touchesRegionBoundary(region, x, y, z)) edgeCells[local] = true;
                     connect(owner, region, localByGlobal, neighbors, x, y, z, x + 1, y, z);
                     connect(owner, region, localByGlobal, neighbors, x, y, z, x, y + 1, z);
                     connect(owner, region, localByGlobal, neighbors, x, y, z, x, y, z + 1);
@@ -463,18 +292,14 @@ public final class TerritoryEngine3D {
             int otherX,
             int otherY,
             int otherZ) {
+        if (!region.contains(otherX, otherY, otherZ)) return;
         int width = region.getWidth();
         int height = region.getHeight();
-        if (otherX >= width || otherY >= height || otherZ >= region.getDepth()) return;
         int firstIndex = (z * height + y) * width + x;
         int secondIndex = (otherZ * height + otherY) * width + otherX;
         int firstOwner = owner[firstIndex];
         int secondOwner = owner[secondIndex];
-        // Only region voxels are ever given an owner, so a non-negative owner
-        // already says the voxel is inside the region; the common case, the
-        // same owner on both sides, returns before the mask is consulted.
         if (firstOwner < 0 || secondOwner < 0 || firstOwner == secondOwner) return;
-        if (!region.contains(otherX, otherY, otherZ)) return;
         int firstLocal = local(localByGlobal, firstOwner);
         int secondLocal = local(localByGlobal, secondOwner);
         if (firstLocal < 0 || secondLocal < 0) return;
